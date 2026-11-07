@@ -43,11 +43,13 @@ def build_parser(description="PPO with asymmetric actor-critic for the hexapod e
     p.add_argument("--norm-adv", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--clip-coef", type=float, default=0.2)
     p.add_argument("--clip-vloss", action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument("--ent-coef", type=float, default=0.01)
+    p.add_argument("--ent-coef", type=float, default=0.005)
     p.add_argument("--vf-coef", type=float, default=1.0)
     p.add_argument("--max-grad-norm", type=float, default=1.0)
     p.add_argument("--hidden-sizes", type=int, nargs="+", default=[512, 256, 128])
-    p.add_argument("--init-std", type=float, default=1.0)
+    p.add_argument("--init-std", type=float, default=0.5)
+    p.add_argument("--bound-coef", type=float, default=1.0)
+    p.add_argument("--action-bound", type=float, default=1.0)
     p.add_argument("--eval-every", type=int, default=50)
     p.add_argument("--eval-episodes", type=int, default=5)
     p.add_argument("--print-every", type=int, default=10)
@@ -91,6 +93,11 @@ class Agent(nn.Module):
             action = dist.sample()
         return action, dist.log_prob(action).sum(1), dist.entropy().sum(1), self.critic(x)
 
+    def evaluate_actions(self, x, action):
+        mean = self.act_mean(x)
+        dist = Normal(mean, torch.exp(self.actor_logstd).expand_as(mean))
+        return dist.log_prob(action).sum(1), dist.entropy().sum(1), self.critic(x), mean
+
 
 def compute_gae(rewards, values, dones, next_value, next_done, gamma, lam):
     num_steps = rewards.shape[0]
@@ -111,16 +118,17 @@ def compute_gae(rewards, values, dones, next_value, next_done, gamma, lam):
 def ppo_update(agent, optimizer, b_obs, b_logprobs, b_actions, b_advantages, b_returns, b_values, args):
     batch_size = b_obs.shape[0]
     minibatch_size = batch_size // args.num_minibatches
-    clipfracs = []
+    clipfracs, out_fracs = [], []
     for _ in range(args.update_epochs):
         b_inds = torch.randperm(batch_size, device=b_obs.device)
         for start in range(0, batch_size, minibatch_size):
             mb_inds = b_inds[start : start + minibatch_size]
-            _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
+            newlogprob, entropy, newvalue, mu = agent.evaluate_actions(b_obs[mb_inds], b_actions[mb_inds])
             logratio = newlogprob - b_logprobs[mb_inds]
             ratio = logratio.exp()
             with torch.no_grad():
                 clipfracs.append(((ratio - 1.0).abs() > args.clip_coef).float().mean())
+                out_fracs.append((mu.abs() > args.action_bound).float().mean())
 
             mb_adv = b_advantages[mb_inds]
             if args.norm_adv:
@@ -140,7 +148,9 @@ def ppo_update(agent, optimizer, b_obs, b_logprobs, b_actions, b_advantages, b_r
                 v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
             entropy_loss = entropy.mean()
-            loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+            b = args.action_bound
+            bound_loss = (torch.relu(mu - b) ** 2 + torch.relu(-b - mu) ** 2).sum(1).mean()
+            loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + args.bound_coef * bound_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -151,6 +161,8 @@ def ppo_update(agent, optimizer, b_obs, b_logprobs, b_actions, b_advantages, b_r
         "policy_loss": pg_loss.item(),
         "entropy": entropy_loss.item(),
         "clipfrac": torch.stack(clipfracs).mean().item(),
+        "bound_loss": bound_loss.item(),
+        "mean_action_out_of_range": torch.stack(out_fracs).mean().item(),
     }
 
 
@@ -389,7 +401,7 @@ def main():
             print(
                 f"it {iteration}/{num_iterations} step {global_step} sps {sps} ret100 {mr:.2f} len100 {ml:.0f} "
                 f"lin_err {info_means['lin_vel_error']:.3f} yaw_err {info_means['yaw_error']:.3f} "
-                f"std {action_std:.3f} lr {lr:.2e} kl {approx_kl:.4f}",
+                f"std {action_std:.3f} out {stats['mean_action_out_of_range']:.2f} lr {lr:.2e} kl {approx_kl:.4f}",
                 flush=True,
             )
 

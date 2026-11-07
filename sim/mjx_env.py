@@ -274,6 +274,7 @@ class MJXHexapodEnv:
     def _rewards(self, s, meas, a):
         rc = self.cfg["rewards"]
         sigma = rc["tracking_sigma"]
+        sigma_yaw = rc.get("tracking_sigma_yaw", sigma)
         cmd = s.command
         lin_err2 = jnp.sum((cmd[:2] - meas["lin_vel"][:2]) ** 2)
         yaw_err = cmd[2] - meas["ang_vel"][2]
@@ -289,7 +290,7 @@ class MJXHexapodEnv:
         q = meas["dof_pos"]
         raw = {
             "tracking_lin_vel": jnp.exp(-lin_err2 / sigma),
-            "tracking_ang_vel": jnp.exp(-yaw_err ** 2 / sigma),
+            "tracking_ang_vel": jnp.exp(-yaw_err ** 2 / sigma_yaw),
             "feet_air_time": air,
             "lin_vel_z": meas["lin_vel"][2] ** 2,
             "ang_vel_xy": jnp.sum(meas["ang_vel"][:2] ** 2),

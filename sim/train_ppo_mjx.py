@@ -144,7 +144,7 @@ def main():
             print(
                 f"it {iteration}/{num_iterations} step {global_step} sps {sps} ret {mr:.2f} len {ml:.0f} episodes {int(n_done)} "
                 f"lin_err {info_means['lin_vel_error']:.3f} yaw_err {info_means['yaw_error']:.3f} "
-                f"std {action_std:.3f} lr {lr:.2e} kl {approx_kl:.4f}",
+                f"std {action_std:.3f} out {stats['mean_action_out_of_range']:.2f} lr {lr:.2e} kl {approx_kl:.4f}",
                 flush=True,
             )
 

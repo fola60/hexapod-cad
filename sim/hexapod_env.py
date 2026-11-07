@@ -294,6 +294,7 @@ class HexapodEnv(gym.Env):
     def _rewards(self, action):
         rc = self.cfg["rewards"]
         sigma = rc["tracking_sigma"]
+        sigma_yaw = rc.get("tracking_sigma_yaw", sigma)
         cmd = self.command
         lin_err2 = float(np.sum((cmd[:2] - self.base_lin_vel[:2]) ** 2))
         yaw_err = float(cmd[2] - self.base_ang_vel[2])
@@ -311,7 +312,7 @@ class HexapodEnv(gym.Env):
         q = self.dof_pos
         raw = {
             "tracking_lin_vel": np.exp(-lin_err2 / sigma),
-            "tracking_ang_vel": np.exp(-yaw_err ** 2 / sigma),
+            "tracking_ang_vel": np.exp(-yaw_err ** 2 / sigma_yaw),
             "feet_air_time": air,
             "lin_vel_z": self.base_lin_vel[2] ** 2,
             "ang_vel_xy": float(np.sum(self.base_ang_vel[:2] ** 2)),
