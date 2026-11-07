@@ -1,0 +1,5 @@
+mujoco>=3.2
+gymnasium>=1.1
+numpy>=1.26
+torch>=2.2
+tensorboard>=2.15

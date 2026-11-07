@@ -1,0 +1,82 @@
+{
+  "robot": {
+    "model": "../crab.xml",
+    "base_body": "base_link",
+    "imu_site": "imu",
+    "floor_geom": "floor",
+    "foot_geoms": ["FL_foot", "ML_foot", "RL_foot", "FR_foot", "MR_foot", "RR_foot"],
+    "default_keyframe": "stand"
+  },
+  "control": {
+    "policy_dt": 0.02,
+    "action_scale": 0.25,
+    "action_clip": 1.0,
+    "kp": null,
+    "kv": null,
+    "torque_limit": null
+  },
+  "episode": {
+    "max_time_s": 20.0,
+    "fall_tilt_deg": 60.0,
+    "min_base_height": 0.04,
+    "reset_joint_noise": 0.05,
+    "random_yaw": true
+  },
+  "commands": {
+    "vx": [-0.3, 0.5],
+    "vy": [-0.3, 0.3],
+    "yaw": [-1.0, 1.0],
+    "resample_s": [5.0, 10.0],
+    "zero_prob": 0.15,
+    "min_xy": 0.05
+  },
+  "obs": {
+    "scales": {
+      "ang_vel": 0.25,
+      "cmd": [2.0, 2.0, 0.25],
+      "dof_vel": 0.05,
+      "lin_vel": 2.0
+    },
+    "noise": {
+      "enabled": true,
+      "ang_vel": 0.2,
+      "gravity": 0.05,
+      "dof_pos": 0.01,
+      "dof_vel": 1.5
+    }
+  },
+  "rewards": {
+    "only_positive_rewards": true,
+    "termination_penalty": -5.0,
+    "tracking_sigma": 0.25,
+    "feet_air_time_target": 0.3,
+    "feet_air_time_min_cmd": 0.1,
+    "soft_dof_pos_limit": 0.9,
+    "weights": {
+      "tracking_lin_vel": 1.0,
+      "tracking_ang_vel": 0.5,
+      "feet_air_time": 1.0,
+      "lin_vel_z": -2.0,
+      "ang_vel_xy": -0.05,
+      "orientation": -1.0,
+      "torques": -1e-4,
+      "action_rate": -0.01,
+      "dof_acc": -2.5e-7,
+      "collision": -1.0,
+      "foot_slip": -0.1,
+      "dof_pos_limits": -1.0
+    }
+  },
+  "domain_rand": {
+    "enabled": false,
+    "friction": [0.5, 1.25],
+    "base_mass_scale": [0.85, 1.15],
+    "payload_kg": [0.0, 0.3],
+    "torque_limit_scale": [0.9, 1.1],
+    "kp_scale": [0.85, 1.15],
+    "kv_scale": [0.85, 1.15],
+    "action_delay_steps": [0, 2],
+    "push_interval_s": [4.0, 8.0],
+    "push_vel_xy": 0.3
+  }
+}
