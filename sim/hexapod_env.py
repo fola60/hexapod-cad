@@ -20,6 +20,7 @@ REWARD_TERMS = (
     "foot_slip",
     "dof_pos_limits",
 )
+INFO_KEYS = tuple(f"rew_{k}" for k in REWARD_TERMS) + ("rew_termination", "lin_vel_error", "yaw_error")
 
 
 def quat_to_mat(q):

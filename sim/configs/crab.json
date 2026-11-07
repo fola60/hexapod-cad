@@ -15,6 +15,10 @@
     "kv": null,
     "torque_limit": null
   },
+  "mjx": {
+    "iterations": 4,
+    "ls_iterations": 8
+  },
   "episode": {
     "max_time_s": 20.0,
     "fall_tilt_deg": 60.0,
