@@ -15,13 +15,16 @@ from mjx_env import MJXHexapodEnv
 from train_ppo import (
     Agent,
     adapt_lr,
+    apply_init_checkpoint,
     build_parser,
     compute_gae,
     explained_variance,
     log_update,
     ppo_update,
+    read_init_checkpoint,
     run_eval,
     setup_run,
+    start_point,
 )
 
 
@@ -37,8 +40,9 @@ def main():
     p = build_parser("PPO with asymmetric actor-critic, MJX physics on the GPU")
     p.set_defaults(num_envs=4096, num_steps=24, total_timesteps=200_000_000, eval_every=25, print_every=5)
     args = p.parse_args()
+    init_ckpt = read_init_checkpoint(args)
     batch_size = args.num_envs * args.num_steps
-    num_iterations = args.total_timesteps // batch_size
+    start_step, start_iteration, num_iterations = start_point(init_ckpt, args, batch_size)
     run_dir, cfg, cfg_dir, writer = setup_run(args)
 
     backend = jax.default_backend()
@@ -55,8 +59,8 @@ def main():
     obs_dim, actor_obs_dim, action_dim = env.obs_dim, env.actor_obs_dim, env.nu
 
     agent = Agent(obs_dim, actor_obs_dim, action_dim, args.hidden_sizes, args.init_std).to(device)
-    lr = args.learning_rate
-    optimizer = optim.Adam(agent.parameters(), lr=lr, eps=1e-5)
+    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    lr = apply_init_checkpoint(init_ckpt, agent, optimizer, args, obs_dim, actor_obs_dim, action_dim)
 
     obs = torch.zeros((args.num_steps, args.num_envs, obs_dim), device=device)
     actions = torch.zeros((args.num_steps, args.num_envs, action_dim), device=device)
@@ -78,10 +82,10 @@ def main():
     ep_ret = torch.zeros(args.num_envs, device=device)
     ep_len = torch.zeros(args.num_envs, device=device)
     best_eval = -np.inf
-    global_step = 0
+    global_step = start_step
     start_time = time.time()
 
-    for iteration in range(1, num_iterations + 1):
+    for iteration in range(start_iteration + 1, num_iterations + 1):
         info_sum = torch.zeros(len(INFO_KEYS), device=device)
         fin = torch.zeros(4, device=device)
 
@@ -128,7 +132,7 @@ def main():
         stats = ppo_update(agent, optimizer, b_obs, b_logprobs, b_actions, advantages.reshape(-1), b_returns, b_values, args)
         lr, approx_kl = adapt_lr(agent, optimizer, lr, b_obs, b_actions, b_logprobs, args)
 
-        sps = int(global_step / (time.time() - start_time))
+        sps = int((global_step - start_step) / (time.time() - start_time))
         action_std = torch.exp(agent.actor_logstd).mean().item()
         info_means = dict(zip(INFO_KEYS, (info_sum / batch_size).tolist()))
         log_update(writer, global_step, lr, approx_kl, action_std, sps, stats, explained_variance(b_values, b_returns), info_means)
@@ -138,7 +142,7 @@ def main():
             writer.add_scalar("charts/mean_length", len_sum / n_done, global_step)
             writer.add_scalar("charts/fall_rate", falls / n_done, global_step)
 
-        if iteration % args.print_every == 0 or iteration == 1:
+        if iteration % args.print_every == 0 or iteration == start_iteration + 1:
             mr = ret_sum / n_done if n_done else float("nan")
             ml = len_sum / n_done if n_done else float("nan")
             print(
@@ -149,7 +153,7 @@ def main():
             )
 
         if iteration % args.eval_every == 0 or iteration == num_iterations:
-            best_eval = run_eval(agent, eval_env, args, writer, run_dir, cfg, cfg_dir, iteration, global_step, best_eval, device)
+            best_eval = run_eval(agent, eval_env, args, writer, run_dir, cfg, cfg_dir, iteration, global_step, best_eval, device, optimizer, lr)
 
     eval_env.close()
     writer.close()

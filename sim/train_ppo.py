@@ -53,6 +53,9 @@ def build_parser(description="PPO with asymmetric actor-critic for the hexapod e
     p.add_argument("--eval-every", type=int, default=50)
     p.add_argument("--eval-episodes", type=int, default=5)
     p.add_argument("--print-every", type=int, default=10)
+    p.add_argument("--init-checkpoint", default=None)
+    p.add_argument("--init-optimizer", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--continue-steps", action=argparse.BooleanOptionalAction, default=True)
     return p
 
 
@@ -235,10 +238,12 @@ def evaluate(agent, env, episodes, seed, device):
     }
 
 
-def save_checkpoint(path, agent, args, cfg, cfg_dir, env, iteration, global_step, eval_return):
+def save_checkpoint(path, agent, args, cfg, cfg_dir, env, iteration, global_step, eval_return, optimizer=None, lr=None):
     torch.save(
         {
             "agent": agent.state_dict(),
+            "optimizer": optimizer.state_dict() if optimizer is not None else None,
+            "lr": lr,
             "obs_dim": env.obs_dim,
             "actor_obs_dim": env.actor_obs_dim,
             "action_dim": env.nu,
@@ -255,7 +260,7 @@ def save_checkpoint(path, agent, args, cfg, cfg_dir, env, iteration, global_step
     )
 
 
-def run_eval(agent, eval_env, args, writer, run_dir, cfg, cfg_dir, iteration, global_step, best_eval, device):
+def run_eval(agent, eval_env, args, writer, run_dir, cfg, cfg_dir, iteration, global_step, best_eval, device, optimizer=None, lr=None):
     ev = evaluate(agent, eval_env, args.eval_episodes, args.seed + 100_000, device)
     for k, v in ev.items():
         writer.add_scalar(f"eval/{k}", v, global_step)
@@ -264,11 +269,60 @@ def run_eval(agent, eval_env, args, writer, run_dir, cfg, cfg_dir, iteration, gl
         f"fall {ev['fall_rate']:.2f} lin_err {ev['lin_vel_error']:.3f} yaw_err {ev['yaw_error']:.3f}",
         flush=True,
     )
-    save_checkpoint(run_dir / "latest.pt", agent, args, cfg, cfg_dir, eval_env, iteration, global_step, ev["return"])
+    save_checkpoint(run_dir / "latest.pt", agent, args, cfg, cfg_dir, eval_env, iteration, global_step, ev["return"], optimizer, lr)
     if ev["return"] > best_eval:
         best_eval = ev["return"]
-        save_checkpoint(run_dir / "best.pt", agent, args, cfg, cfg_dir, eval_env, iteration, global_step, ev["return"])
+        save_checkpoint(run_dir / "best.pt", agent, args, cfg, cfg_dir, eval_env, iteration, global_step, ev["return"], optimizer, lr)
     return best_eval
+
+
+def read_init_checkpoint(args):
+    if not args.init_checkpoint:
+        return None
+    ckpt = torch.load(args.init_checkpoint, map_location="cpu", weights_only=False)
+    if list(ckpt["hidden_sizes"]) != list(args.hidden_sizes):
+        print(f"using hidden sizes {ckpt['hidden_sizes']} from {args.init_checkpoint}", flush=True)
+        args.hidden_sizes = list(ckpt["hidden_sizes"])
+    return ckpt
+
+
+def apply_init_checkpoint(ckpt, agent, optimizer, args, obs_dim, actor_obs_dim, action_dim):
+    lr = args.learning_rate
+    if ckpt is None:
+        return lr
+    dims = (ckpt["obs_dim"], ckpt["actor_obs_dim"], ckpt["action_dim"])
+    if dims != (obs_dim, actor_obs_dim, action_dim):
+        raise ValueError(f"checkpoint dims (obs, actor obs, action) {dims} do not match env {(obs_dim, actor_obs_dim, action_dim)}")
+    agent.load_state_dict(ckpt["agent"])
+    if args.init_optimizer:
+        if ckpt.get("optimizer") is None:
+            raise ValueError(f"{args.init_checkpoint} has no optimizer state; run without --init-optimizer")
+        optimizer.load_state_dict(ckpt["optimizer"])
+        lr = ckpt["lr"] if ckpt.get("lr") is not None else optimizer.param_groups[0]["lr"]
+    for g in optimizer.param_groups:
+        g["lr"] = lr
+    std = torch.exp(agent.actor_logstd).mean().item()
+    print(
+        f"initialised from {args.init_checkpoint} (iteration {ckpt.get('iteration')}, eval return {ckpt.get('eval_return')}, "
+        f"std {std:.3f}, lr {lr:.2e}, optimizer {'restored' if args.init_optimizer else 'fresh'})",
+        flush=True,
+    )
+    return lr
+
+
+def start_point(ckpt, args, batch_size):
+    if ckpt is None or not args.continue_steps:
+        return 0, 0, args.total_timesteps // batch_size
+    step, it = int(ckpt["global_step"]), int(ckpt["iteration"])
+    remaining = args.total_timesteps - step
+    if remaining < batch_size:
+        raise ValueError(
+            f"--total-timesteps {args.total_timesteps} leaves nothing to train: the checkpoint is already at step {step}. "
+            f"Raise it, or pass --no-continue-steps to count from zero"
+        )
+    num_iterations = it + remaining // batch_size
+    print(f"continuing from step {step} (iteration {it}): {remaining // batch_size * batch_size} more steps, up to iteration {num_iterations}", flush=True)
+    return step, it, num_iterations
 
 
 def setup_run(args):
@@ -291,8 +345,9 @@ def setup_run(args):
 
 def main():
     args = build_parser().parse_args()
+    init_ckpt = read_init_checkpoint(args)
     batch_size = args.num_envs * args.num_steps
-    num_iterations = args.total_timesteps // batch_size
+    start_step, start_iteration, num_iterations = start_point(init_ckpt, args, batch_size)
     run_dir, cfg, cfg_dir, writer = setup_run(args)
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
@@ -304,8 +359,8 @@ def main():
     obs_dim, actor_obs_dim, action_dim = eval_env.obs_dim, eval_env.actor_obs_dim, eval_env.nu
 
     agent = Agent(obs_dim, actor_obs_dim, action_dim, args.hidden_sizes, args.init_std).to(device)
-    lr = args.learning_rate
-    optimizer = optim.Adam(agent.parameters(), lr=lr, eps=1e-5)
+    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    lr = apply_init_checkpoint(init_ckpt, agent, optimizer, args, obs_dim, actor_obs_dim, action_dim)
 
     obs = torch.zeros((args.num_steps, args.num_envs, obs_dim), device=device)
     actions = torch.zeros((args.num_steps, args.num_envs, action_dim), device=device)
@@ -314,7 +369,7 @@ def main():
     dones = torch.zeros((args.num_steps, args.num_envs), device=device)
     values = torch.zeros((args.num_steps, args.num_envs), device=device)
 
-    global_step = 0
+    global_step = start_step
     start_time = time.time()
     next_obs, _ = envs.reset(seed=args.seed)
     next_obs = torch.as_tensor(next_obs, device=device)
@@ -325,7 +380,7 @@ def main():
     recent_ret, recent_len, recent_fall = deque(maxlen=100), deque(maxlen=100), deque(maxlen=100)
     best_eval = -np.inf
 
-    for iteration in range(1, num_iterations + 1):
+    for iteration in range(start_iteration + 1, num_iterations + 1):
         info_sums = {k: 0.0 for k in INFO_KEYS}
 
         for step in range(args.num_steps):
@@ -386,7 +441,7 @@ def main():
         stats = ppo_update(agent, optimizer, b_obs, b_logprobs, b_actions, advantages.reshape(-1), b_returns, b_values, args)
         lr, approx_kl = adapt_lr(agent, optimizer, lr, b_obs, b_actions, b_logprobs, args)
 
-        sps = int(global_step / (time.time() - start_time))
+        sps = int((global_step - start_step) / (time.time() - start_time))
         action_std = torch.exp(agent.actor_logstd).mean().item()
         info_means = {k: v / batch_size for k, v in info_sums.items()}
         log_update(writer, global_step, lr, approx_kl, action_std, sps, stats, explained_variance(b_values, b_returns), info_means)
@@ -395,7 +450,7 @@ def main():
             writer.add_scalar("charts/mean_length_100", float(np.mean(recent_len)), global_step)
             writer.add_scalar("charts/fall_rate_100", float(np.mean(recent_fall)), global_step)
 
-        if iteration % args.print_every == 0 or iteration == 1:
+        if iteration % args.print_every == 0 or iteration == start_iteration + 1:
             mr = float(np.mean(recent_ret)) if recent_ret else float("nan")
             ml = float(np.mean(recent_len)) if recent_len else float("nan")
             print(
@@ -406,7 +461,7 @@ def main():
             )
 
         if iteration % args.eval_every == 0 or iteration == num_iterations:
-            best_eval = run_eval(agent, eval_env, args, writer, run_dir, cfg, cfg_dir, iteration, global_step, best_eval, device)
+            best_eval = run_eval(agent, eval_env, args, writer, run_dir, cfg, cfg_dir, iteration, global_step, best_eval, device, optimizer, lr)
 
     envs.close()
     eval_env.close()
